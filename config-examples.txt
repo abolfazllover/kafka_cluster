@@ -1,0 +1,190 @@
+# نمونه‌های تنظیمات برای سناریوهای مختلف کلاستر Kafka
+
+═══════════════════════════════════════════════════════════════
+سناریو 1: تست تک‌نود روی localhost
+═══════════════════════════════════════════════════════════════
+
+ورودی‌های منو (گزینه 2 - Primary):
+  node.id: 1
+  پورت Controller: 9093
+  پورت Broker: 9092
+  IP برای Bind: 127.0.0.1
+  Advertised Host: 127.0.0.1
+  Heap (MB): 2048
+  controller.quorum.voters: 1@127.0.0.1:9093
+  فعال‌سازی SASL: no
+  UFW: no
+
+استفاده: برای تست و توسعه روی یک ماشین
+
+═══════════════════════════════════════════════════════════════
+سناریو 2: کلاستر 3 نودی Production (نود اول)
+═══════════════════════════════════════════════════════════════
+
+ورودی‌های منو (گزینه 2 - Primary):
+  node.id: 1
+  پورت Controller: 9093
+  پورت Broker: 9092
+  IP برای Bind: 10.0.0.1
+  Advertised Host: 10.0.0.1
+  Heap (MB): 4096
+  controller.quorum.voters: 1@10.0.0.1:9093,2@10.0.0.2:9093,3@10.0.0.3:9093
+  فعال‌سازی SASL: yes
+  رمز admin: [رمز قوی]
+  UFW: yes
+  subnet مجاز: 10.0.0.0/24
+
+توجه: Cluster ID را یادداشت کنید!
+
+═══════════════════════════════════════════════════════════════
+سناریو 3: کلاستر 3 نودی Production (نودهای دوم و سوم)
+═══════════════════════════════════════════════════════════════
+
+ورودی‌های منو (گزینه 3 - Secondary):
+  Cluster ID: [از نود اول]
+  node.id: 2  (برای نود دوم) یا 3 (برای نود سوم)
+  پورت Controller: 9093
+  پورت Broker: 9092
+  IP برای Bind: 10.0.0.2  (یا 10.0.0.3)
+  Advertised Host: 10.0.0.2  (یا 10.0.0.3)
+  Heap (MB): 4096
+  controller.quorum.voters: 1@10.0.0.1:9093,2@10.0.0.2:9093,3@10.0.0.3:9093
+  فعال‌سازی SASL: yes
+  رمز admin: [همان رمز نود اول]
+  UFW: yes
+  subnet مجاز: 10.0.0.0/24
+
+═══════════════════════════════════════════════════════════════
+سناریو 4: کلاستر 5 نودی با High Availability
+═══════════════════════════════════════════════════════════════
+
+نود 1 (Primary):
+  node.id: 1
+  IP: 10.0.0.1
+  controller.quorum.voters: 1@10.0.0.1:9093,2@10.0.0.2:9093,3@10.0.0.3:9093,4@10.0.0.4:9093,5@10.0.0.5:9093
+  Heap: 6144
+
+نودهای 2-5 (Secondary):
+  node.id: 2, 3, 4, 5
+  IP: 10.0.0.2, 10.0.0.3, 10.0.0.4, 10.0.0.5
+  [همان تنظیمات]
+
+═══════════════════════════════════════════════════════════════
+سناریو 5: کلاستر با نودهای Dedicated Controller
+═══════════════════════════════════════════════════════════════
+
+نودهای Controller (1-3):
+  node.id: 1, 2, 3
+  process.roles: controller  [نیاز به ویرایش دستی server.properties]
+  پورت: 9093
+  
+نودهای Broker (4-6):
+  node.id: 4, 5, 6
+  process.roles: broker  [نیاز به ویرایش دستی server.properties]
+  پورت: 9092
+  
+controller.quorum.voters: 1@host1:9093,2@host2:9093,3@host3:9093
+
+توجه: برای این سناریو بعد از اجرای اسکریپت، باید
+process.roles را دستی در server.properties تغییر دهید.
+
+═══════════════════════════════════════════════════════════════
+پارامترهای توصیه شده بر اساس بار کاری
+═══════════════════════════════════════════════════════════════
+
+--- بار کم (Dev/Test) ---
+RAM: 2GB
+Heap: 1024-2048 MB
+Disk: 20GB SSD
+CPU: 2 cores
+
+--- بار متوسط (Staging) ---
+RAM: 8GB
+Heap: 4096 MB
+Disk: 100GB SSD
+CPU: 4 cores
+
+--- بار سنگین (Production) ---
+RAM: 32GB
+Heap: 8192-16384 MB
+Disk: 500GB+ NVMe SSD
+CPU: 16+ cores
+
+--- بار خیلی سنگین (Enterprise) ---
+RAM: 64GB+
+Heap: 24576-32768 MB
+Disk: 2TB+ NVMe SSD RAID
+CPU: 32+ cores
+
+═══════════════════════════════════════════════════════════════
+تنظیمات پیشنهادی server.properties بعد از نصب
+═══════════════════════════════════════════════════════════════
+
+برای تغییر تنظیمات بعد از نصب:
+nano /etc/kafka/server.properties
+
+# عملکرد بالا (High Performance)
+num.network.threads=8
+num.io.threads=16
+num.replica.fetchers=4
+
+# قابلیت اطمینان بالا (High Reliability)
+min.insync.replicas=2
+unclean.leader.election.enable=false
+default.replication.factor=3
+
+# فشرده‌سازی (بهبود throughput)
+compression.type=lz4
+
+# برای workload های write-heavy
+log.flush.interval.messages=10000
+log.flush.interval.ms=1000
+
+بعد از تغییر: systemctl restart kafka
+
+═══════════════════════════════════════════════════════════════
+دستورات مفید بعد از نصب
+═══════════════════════════════════════════════════════════════
+
+# لیست topics
+/opt/kafka/current/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# ایجاد topic
+/opt/kafka/current/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic my-topic --partitions 3 --replication-factor 3
+
+# توضیحات topic
+/opt/kafka/current/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --describe --topic my-topic
+
+# تولید پیام تست
+echo "test message" | /opt/kafka/current/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic my-topic
+
+# مصرف پیام
+/opt/kafka/current/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic my-topic --from-beginning
+
+# وضعیت کلاستر
+/opt/kafka/current/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 describe --status
+
+═══════════════════════════════════════════════════════════════
+چک‌لیست قبل از Production
+═══════════════════════════════════════════════════════════════
+
+□ حداقل 3 نود برای quorum
+□ همه نودها زمان همگام دارند (NTP)
+□ فایروال تنظیم شده (فقط نودهای کلاستر)
+□ نام DNS یا IP ثابت برای همه نودها
+□ Heap کافی تخصیص داده شده
+□ دیسک SSD با فضای کافی
+□ SASL/TLS فعال شده (اگر نیاز است)
+□ ACL تنظیم شده
+□ مانیتورینگ راه‌اندازی شده
+□ Backup خودکار تنظیم شده
+□ تست کامل انجام شده (Health Check + Producer/Consumer)
+□ مستندات داخلی تهیه شده
+
+═══════════════════════════════════════════════════════════════
+
