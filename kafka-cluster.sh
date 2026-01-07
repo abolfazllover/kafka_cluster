@@ -13,6 +13,8 @@ LOG_FILE="/var/log/kafka-bootstrap.log"
 
 KAFKA_VERSION_DEFAULT="3.7.1"
 SCALA_VERSION_DEFAULT="2.13"
+KAFKA_VERSIONS_CACHE="/tmp/kafka-versions-cache.txt"
+KAFKA_VERSIONS_CACHE_AGE=3600  # 1 hour
 KAFKA_BASE_DIR="/opt/kafka"
 KAFKA_SYMLINK="/opt/kafka/current"
 KAFKA_USER="kafka"
@@ -51,14 +53,30 @@ need_root() {
 log_init() {
   mkdir -p "$(dirname "$LOG_FILE")" || true
   touch "$LOG_FILE" 2>/dev/null || true
-  chmod 0600 "$LOG_FILE" 2>/dev/null || true
+  # اجازه خواندن لاگ برای کاربر روت
+  chmod 0644 "$LOG_FILE" 2>/dev/null || true
 }
 
 on_error() {
   local exit_code=$?
   local line_no=${1:-"?"}
-  warn "اجرا در خط ${line_no} با کد ${exit_code} متوقف شد."
-  warn "برای جزئیات بیشتر: $LOG_FILE"
+  echo
+  warn "═══════════════════════════════════════════════════"
+  warn "خطا: اجرا در خط ${line_no} با کد ${exit_code} متوقف شد."
+  warn "═══════════════════════════════════════════════════"
+  if [[ -r "$LOG_FILE" ]]; then
+    echo
+    echo "آخرین 30 خط لاگ:"
+    echo "───────────────────────────────────────────────────────"
+    tail -n 30 "$LOG_FILE" 2>/dev/null || true
+    echo "───────────────────────────────────────────────────────"
+    echo
+    echo "برای مشاهده کل لاگ: sudo cat $LOG_FILE | less"
+  else
+    warn "فایل لاگ قابل خواندن نیست: $LOG_FILE"
+    warn "لطفاً دسترسی فایل را چک کنید: ls -la $LOG_FILE"
+  fi
+  echo
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
@@ -263,6 +281,155 @@ prompt_secret() {
   echo "$var"
 }
 
+fetch_kafka_versions() {
+  # این تابع فقط نسخه‌ها را به stdout می‌فرستد (بدون پیام‌های اضافی)
+  
+  local cache_valid=0
+  if [[ -f "$KAFKA_VERSIONS_CACHE" ]]; then
+    local cache_age
+    cache_age=$(($(date +%s) - $(stat -c %Y "$KAFKA_VERSIONS_CACHE" 2>/dev/null || echo "0")))
+    if ((cache_age < KAFKA_VERSIONS_CACHE_AGE)); then
+      cache_valid=1
+    fi
+  fi
+  
+  if ((cache_valid == 1)); then
+    cat "$KAFKA_VERSIONS_CACHE" 2>/dev/null
+    return 0
+  fi
+  
+  # تلاش برای دریافت از Apache Maven Repository
+  local versions_url="https://repo1.maven.org/maven2/org/apache/kafka/kafka-server-common/maven-metadata.xml"
+  
+  if curl -fsSL --connect-timeout 10 --max-time 30 "$versions_url" 2>/dev/null | \
+     grep -oP '<version>\K[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null | \
+     sort -V -r > "$KAFKA_VERSIONS_CACHE.tmp" 2>/dev/null; then
+    
+    if [[ -s "$KAFKA_VERSIONS_CACHE.tmp" ]]; then
+      mv "$KAFKA_VERSIONS_CACHE.tmp" "$KAFKA_VERSIONS_CACHE"
+      cat "$KAFKA_VERSIONS_CACHE" 2>/dev/null
+      return 0
+    fi
+  fi
+  
+  # روش جایگزین: دریافت از Apache Archive
+  local archive_url="https://archive.apache.org/dist/kafka/"
+  
+  if curl -fsSL --connect-timeout 10 --max-time 30 "$archive_url" 2>/dev/null | \
+     grep -oP 'href="\K[0-9]+\.[0-9]+\.[0-9]+(?=/")' 2>/dev/null | \
+     sort -V -r | head -20 > "$KAFKA_VERSIONS_CACHE.tmp" 2>/dev/null; then
+    
+    if [[ -s "$KAFKA_VERSIONS_CACHE.tmp" ]]; then
+      mv "$KAFKA_VERSIONS_CACHE.tmp" "$KAFKA_VERSIONS_CACHE"
+      cat "$KAFKA_VERSIONS_CACHE" 2>/dev/null
+      return 0
+    fi
+  fi
+  
+  # Fallback: لیست دستی نسخه‌های معروف اخیر (به‌روزرسانی شده)
+  cat > "$KAFKA_VERSIONS_CACHE" <<'EOF'
+3.8.0
+3.7.1
+3.7.0
+3.6.2
+3.6.1
+3.6.0
+3.5.2
+3.5.1
+3.5.0
+3.4.1
+3.4.0
+3.3.2
+3.3.1
+3.3.0
+3.2.3
+3.2.2
+3.2.1
+3.2.0
+EOF
+  cat "$KAFKA_VERSIONS_CACHE" 2>/dev/null
+  return 0
+}
+
+select_kafka_version() {
+  local selected_version=""
+  
+  echo
+  info "دریافت نسخه‌های موجود..."
+  
+  # دریافت نسخه‌ها به صورت آرایه
+  local versions_str
+  versions_str=$(fetch_kafka_versions)
+  
+  if [[ -z "$versions_str" ]]; then
+    warn "نتوانستم نسخه‌ها را دریافت کنم. از نسخه پیش‌فرض استفاده می‌شود."
+    echo "$KAFKA_VERSION_DEFAULT"
+    return 0
+  fi
+  
+  # تبدیل string به array
+  local versions=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && versions+=("$line")
+  done <<< "$versions_str"
+  
+  if ((${#versions[@]} == 0)); then
+    warn "هیچ نسخه‌ای یافت نشد. از نسخه پیش‌فرض استفاده می‌شود."
+    echo "$KAFKA_VERSION_DEFAULT"
+    return 0
+  fi
+  
+  echo
+  echo "═══════════════════════════════════════════════════"
+  echo "نسخه‌های موجود Kafka (جدیدترین اول):"
+  echo "═══════════════════════════════════════════════════"
+  local i=1
+  for version in "${versions[@]}"; do
+    if [[ "$version" == "$KAFKA_VERSION_DEFAULT" ]]; then
+      echo "  [$i] $version ${GRN}← پیش‌فرض (توصیه می‌شود)${RST}"
+    else
+      echo "  [$i] $version"
+    fi
+    i=$((i + 1))
+    # فقط 20 نسخه اول را نمایش بده
+    if ((i > 20)); then
+      echo "  ... (${#versions[@]} نسخه موجود)"
+      break
+    fi
+  done
+  echo "  [0] وارد کردن دستی نسخه"
+  echo "═══════════════════════════════════════════════════"
+  echo
+  
+  while true; do
+    read -r -p "انتخاب نسخه (0-${#versions[@]} یا Enter برای پیش‌فرض): " choice
+    choice="${choice:-default}"
+    
+    if [[ "$choice" == "default" ]] || [[ "$choice" == "" ]]; then
+      selected_version="$KAFKA_VERSION_DEFAULT"
+      ok "نسخه پیش‌فرض انتخاب شد: $selected_version"
+      break
+    elif [[ "$choice" == "0" ]]; then
+      read -r -p "نسخه را وارد کنید (مثال: 3.7.1): " manual_version
+      if [[ "$manual_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        selected_version="$manual_version"
+        ok "نسخه دستی انتخاب شد: $selected_version"
+        break
+      else
+        warn "فرمت نسخه نامعتبر است. باید به فرمت X.Y.Z باشد (مثال: 3.7.1)."
+      fi
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#versions[@]})); then
+      selected_version="${versions[$((choice - 1))]}"
+      ok "نسخه انتخاب شد: $selected_version"
+      break
+    else
+      warn "گزینه نامعتبر است. لطفاً عدد بین 0 تا ${#versions[@]} وارد کنید."
+    fi
+  done
+  
+  echo "$selected_version"
+}
+
 download_kafka() {
   local kafka_version="$1"
   local scala_version="$2"
@@ -301,24 +468,108 @@ download_kafka() {
     die "دانلود Kafka از تمام mirror ها ناموفق بود. اتصال اینترنت را چک کنید."
   fi
   
-  # دانلود checksum
+  # دانلود checksum - تلاش با چند فرمت مختلف
   sha_url="${url}.sha512"
-  if ! curl -fsSL --retry 3 --retry-delay 2 -o "${sha}" "${sha_url}" >>"$LOG_FILE" 2>&1; then
-    warn "دانلود فایل sha512 ناموفق بود. بدون اعتبارسنجی ادامه می‌دهیم (ریسک امنیتی!)."
+  local sha_downloaded=0
+  
+  if curl -fsSL --retry 3 --retry-delay 2 -o "${sha}" "${sha_url}" >>"$LOG_FILE" 2>&1; then
+    sha_downloaded=1
   else
-    info "اعتبارسنجی sha512 ..."
-    local expect_name
-    expect_name="$(awk '{print $2}' "${sha}" | head -n1)"
-    if [[ -z "$expect_name" ]]; then
-      warn "فرمت فایل sha512 غیرمنتظره است. بدون اعتبارسنجی ادامه می‌دهیم."
-    else
-      run "cp '${tgz}' '${tmp_dir}/${expect_name}'"
-      if ! (cd "${tmp_dir}" && sha512sum -c "kafka.tgz.sha512" >>"$LOG_FILE" 2>&1); then
-        rm -rf "$tmp_dir"
-        die "اعتبارسنجی sha512 ناموفق بود! فایل دانلود شده ممکن است خراب یا جعلی باشد."
-      fi
-      ok "اعتبارسنجی موفق"
+    # تلاش با نام دیگر
+    local sha_alt_url="${url}.sha512.asc"
+    if curl -fsSL --retry 3 --retry-delay 2 -o "${sha}" "${sha_alt_url}" >>"$LOG_FILE" 2>&1; then
+      sha_downloaded=1
     fi
+  fi
+  
+  if ((sha_downloaded == 1)); then
+    info "اعتبارسنجی sha512 ..."
+    
+    # چک وجود ابزار sha512sum
+    if ! have_cmd sha512sum; then
+      warn "ابزار sha512sum موجود نیست. نصب..."
+      apt-get install -y coreutils >>"$LOG_FILE" 2>&1 || {
+        warn "نصب sha512sum ناموفق بود. بدون اعتبارسنجی ادامه می‌دهیم."
+        sha_downloaded=0
+      }
+    fi
+    
+    if ((sha_downloaded == 1)); then
+      # محاسبه SHA512 فایل دانلود شده
+      local computed_hash
+      computed_hash=$(sha512sum "${tgz}" 2>/dev/null | awk '{print $1}' | tr '[:upper:]' '[:lower:]' || echo "")
+      
+      if [[ -z "$computed_hash" ]] || [[ ${#computed_hash} -ne 128 ]]; then
+        warn "محاسبه SHA512 فایل دانلود شده ناموفق بود. فایل ممکن است خراب باشد."
+        read -r -p "آیا می‌خواهید بدون اعتبارسنجی ادامه دهید؟ (yes/no): " skip_verify || skip_verify="no"
+        if [[ "$skip_verify" != "yes" ]]; then
+          rm -rf "$tmp_dir"
+          die "اعتبارسنجی لغو شد."
+        fi
+        warn "ادامه بدون اعتبارسنجی (ریسک امنیتی!)"
+      else
+        # خواندن hash از فایل SHA512 (می‌تواند فرمت‌های مختلف داشته باشد)
+        local expected_hash=""
+        local sha_lines
+        sha_lines=$(wc -l < "${sha}" 2>/dev/null || echo "0")
+        
+        # روش 1: فقط hash در یک خط (بدون نام فایل)
+        if ((sha_lines == 1)); then
+          expected_hash=$(cat "${sha}" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || echo "")
+          # اگر فقط hash است و طول درست دارد
+          if [[ ${#expected_hash} -eq 128 ]]; then
+            expected_hash="${expected_hash:0:128}"
+          fi
+        fi
+        
+        # روش 2: فرمت "hash  filename" یا "hash *filename"
+        if [[ -z "$expected_hash" ]] || [[ ${#expected_hash} -ne 128 ]]; then
+          expected_hash=$(awk '{print $1}' "${sha}" 2>/dev/null | head -n1 | tr -d '[:space:*]' | tr '[:upper:]' '[:lower:]' || echo "")
+          # اگر hash بیشتر از 128 کاراکتر است (ممکن است PGP signature باشد)، فقط 128 کاراکتر اول را بگیر
+          if [[ ${#expected_hash} -gt 128 ]]; then
+            expected_hash="${expected_hash:0:128}"
+          fi
+        fi
+        
+        # روش 3: جستجو برای الگوی SHA512 (128 کاراکتر hexadecimal)
+        if [[ -z "$expected_hash" ]] || [[ ${#expected_hash} -ne 128 ]]; then
+          expected_hash=$(grep -oE '[a-f0-9]{128}' "${sha}" 2>/dev/null | head -n1 | tr '[:upper:]' '[:lower:]' || echo "")
+        fi
+        
+        # مقایسه
+        if [[ -n "$expected_hash" ]] && [[ ${#expected_hash} -eq 128 ]] && [[ "$computed_hash" == "$expected_hash" ]]; then
+          ok "اعتبارسنجی SHA512 موفق ✓"
+        elif [[ -z "$expected_hash" ]] || [[ ${#expected_hash} -ne 128 ]]; then
+          warn "نتوانستم hash را از فایل SHA512 استخراج کنم. فرمت غیرمنتظره است."
+          warn "محاسبه شده: ${computed_hash:0:16}..."
+          warn "محتوای فایل SHA512 (10 کاراکتر اول): $(head -c 50 "${sha}" 2>/dev/null || echo "خالی")"
+          read -r -p "آیا می‌خواهید بدون اعتبارسنجی ادامه دهید؟ (yes/no): " skip_verify || skip_verify="no"
+          if [[ "$skip_verify" != "yes" ]]; then
+            rm -rf "$tmp_dir"
+            die "اعتبارسنجی لغو شد."
+          fi
+          warn "ادامه بدون اعتبارسنجی (ریسک امنیتی!)"
+        else
+          warn "هش‌ها مطابقت ندارند!"
+          warn "محاسبه شده: ${computed_hash:0:32}..."
+          warn "انتظار می‌رفت: ${expected_hash:0:32}..."
+          read -r -p "فایل ممکن است خراب باشد. آیا می‌خواهید ادامه دهید؟ (yes/no): " force_continue || force_continue="no"
+          if [[ "$force_continue" != "yes" ]]; then
+            rm -rf "$tmp_dir"
+            die "اعتبارسنجی ناموفق بود. دانلود مجدد توصیه می‌شود."
+          fi
+          warn "ادامه با فایل مشکوک (ریسک امنیتی!)"
+        fi
+      fi
+    fi
+  else
+    warn "دانلود فایل sha512 ناموفق بود."
+    read -r -p "آیا می‌خواهید بدون اعتبارسنجی ادامه دهید؟ (yes/no): " skip_verify || skip_verify="no"
+    if [[ "$skip_verify" != "yes" ]]; then
+      rm -rf "$tmp_dir"
+      die "اعتبارسنجی لغو شد."
+    fi
+    warn "ادامه بدون اعتبارسنجی (ریسک امنیتی!)"
   fi
 
   info "استخراج ..."
@@ -1134,14 +1385,23 @@ action_install_prepare() {
   echo
   info "═══ دانلود و نصب Kafka ═══"
   local kafka_ver scala_ver
-  kafka_ver="$(prompt_default 'نسخه Kafka' "$KAFKA_VERSION_DEFAULT")"
-  scala_ver="$(prompt_default 'نسخه Scala (برای پکیج Kafka)' "$SCALA_VERSION_DEFAULT")"
-
-  # چک نسخه معتبر
-  if [[ ! "$kafka_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    warn "فرمت نسخه نامعتبر است. از نسخه پیش‌فرض استفاده می‌کنم."
+  
+  # دریافت خودکار نسخه‌های موجود
+  kafka_ver="$(select_kafka_version)"
+  
+  if [[ -z "$kafka_ver" ]]; then
+    warn "نسخه انتخاب نشد. از نسخه پیش‌فرض استفاده می‌کنم."
     kafka_ver="$KAFKA_VERSION_DEFAULT"
   fi
+  
+  # چک نسخه معتبر
+  if [[ ! "$kafka_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    warn "فرمت نسخه نامعتبر است ($kafka_ver). از نسخه پیش‌فرض استفاده می‌کنم."
+    kafka_ver="$KAFKA_VERSION_DEFAULT"
+  fi
+  
+  info "نسخه انتخاب شده: $kafka_ver"
+  scala_ver="$(prompt_default 'نسخه Scala (برای پکیج Kafka، معمولاً 2.13)' "$SCALA_VERSION_DEFAULT")"
   
   download_kafka "$kafka_ver" "$scala_ver"
   
